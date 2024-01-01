@@ -195,10 +195,370 @@ int ksu_handle_rename(struct dentry *old_dentry, struct dentry *new_dentry)
 
 	return 0;
 }
+#include <linux/sched/mm.h>
+#include <linux/perf_event.h>
+#include <linux/hw_breakpoint.h>
+
+static inline unsigned long size_inside_page(unsigned long start,
+					     unsigned long size)
+{
+	unsigned long sz;
+	sz = PAGE_SIZE - (start & (PAGE_SIZE - 1));
+	return min(sz, size);
+}
+static inline bool should_stop_iteration(void)
+{
+	if (need_resched())
+		cond_resched();
+	return fatal_signal_pending(current);
+}
+
+static inline int page_is_allowed(unsigned long pfn)
+{
+	return 1;
+}
+static inline int range_is_allowed(unsigned long pfn, unsigned long size)
+{
+	return 1;
+}
+
+static phys_addr_t translate_linear_address(struct mm_struct *mm, uintptr_t va)
+{
+	p4d_t *p4d;
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *pte;
+	pud_t *pud;
+
+	phys_addr_t page_addr;
+	uintptr_t page_offset;
+
+	pgd = pgd_offset(mm, va);
+	if (pgd_none(*pgd) || pgd_bad(*pgd)) {
+		return 0;
+	}
+	p4d = p4d_offset(pgd, va);
+	if (p4d_none(*p4d) || p4d_bad(*p4d)) {
+		return 0;
+	}
+	pud = pud_offset(p4d, va);
+	if (pud_none(*pud) || pud_bad(*pud)) {
+		return 0;
+	}
+	pmd = pmd_offset(pud, va);
+	if (pmd_none(*pmd)) {
+		return 0;
+	}
+	pte = pte_offset_kernel(pmd, va);
+	if (pte_none(*pte)) {
+		return 0;
+	}
+	if (!pte_present(*pte)) {
+		return 0;
+	}
+	//页物理地址
+	page_addr = (phys_addr_t)(pte_pfn(*pte) << PAGE_SHIFT);
+	//页内偏移
+	page_offset = va & (PAGE_SIZE - 1);
+
+	return page_addr + page_offset;
+}
+
+static size_t read_process_memory(pid_t pid, uintptr_t addr, void *buffer,
+				  size_t size)
+{
+	struct task_struct *task;
+	struct mm_struct *mm;
+	phys_addr_t pa;
+	size_t sz, read = 0;
+	void *ptr;
+	char *bounce;
+	int probe;
+
+	task = find_get_task_by_vpid(pid);
+	if (!task)
+		return 0;
+
+	mm = get_task_mm(task);
+	if (!mm || IS_ERR(mm))
+		goto put_task_struct;
+
+	bounce = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!bounce)
+		goto mmput;
+
+	while (size > 0) {
+		sz = size_inside_page(addr, size);
+
+		pa = translate_linear_address(mm, addr);
+		if (!pa)
+			goto cc;
+
+		ptr = xlate_dev_mem_ptr(pa);
+		if (!ptr)
+			goto cc;
+
+		probe = copy_from_kernel_nofault(bounce, ptr, sz);
+		unxlate_dev_mem_ptr(pa, ptr);
+		if (probe)
+			goto cc;
+
+		if (copy_to_user(buffer, bounce, sz))
+			goto cc;
+
+        cc:
+		size -= sz;
+		addr += sz;
+		buffer += sz;
+		read += sz;
+		if (should_stop_iteration())
+			break;
+	}
+	kfree(bounce);
+mmput:
+	mmput(mm);
+put_task_struct:
+	put_task_struct(task);
+	return read;
+}
+
+static size_t write_process_memory(pid_t pid, uintptr_t addr, void *buffer,
+				   size_t size)
+{
+	struct task_struct *task;
+	struct mm_struct *mm;
+	phys_addr_t pa;
+	size_t sz, written = 0;
+	void *ptr;
+	unsigned long copied;
+
+	task = find_get_task_by_vpid(pid);
+	if (!task)
+		return 0;
+
+	mm = get_task_mm(task);
+	if (!mm || IS_ERR(mm))
+		goto put_task_struct;
+
+	while (size > 0) {
+		sz = size_inside_page(addr, size);
+
+		pa = translate_linear_address(mm, addr);
+		if (!pa)
+			goto cc;
+
+		ptr = xlate_dev_mem_ptr(pa);
+		if (!ptr)
+			goto cc;
+
+		copied = copy_from_user(ptr, buffer, sz);
+		unxlate_dev_mem_ptr(pa, ptr);
+		if (copied)
+			goto cc;
+
+        cc:
+		size -= sz;
+		addr += sz;
+		buffer += sz;
+		written += sz;
+		if (should_stop_iteration())
+			break;
+	}
+
+out:
+	mmput(mm);
+put_task_struct:
+	put_task_struct(task);
+	return written;
+}
+
+static u64 xregs[7] = { 0 };
+static __uint128_t vregs[7] = { 0 };
+static struct perf_event *sample_hbp[300] = { 0 };
+
+static void sample_hbp_handler(struct perf_event *bp,
+			       struct perf_sample_data *data,
+			       struct pt_regs *regs)
+{
+	pr_info(KERN_INFO "hw_breakpoint HIT!!!!! %p %d\n", regs->pc, bp->id);
+	/* int i;
+	for (i = 0; i < 7; i++) {
+		if (xregs[i] != 0) {
+			regs->regs[i] = xregs[i];
+			pr_info("!! xregs[%d]: 0x%lX\n", i, xregs[i]);
+		}
+	}
+	struct user_fpsimd_state *fpsimd_state =
+		&current->thread.uw.fpsimd_state;
+	for (i = 0; i < 7; i++) {
+		if (vregs[i] != 0) {
+			fpsimd_state->vregs[i] = vregs[i];
+			pr_info("!! vregs[%d]: 0x%llX\n", i, vregs[i]);
+		}
+	} */
+}
+
+static int my_register_breakpoint(struct perf_event *p_sample_hbp, pid_t pid,
+				  u64 addr, u64 len, u32 type)
+{
+	struct perf_event_attr attr;
+	struct task_struct *task;
+
+	task = find_get_task_by_vpid(pid);
+	if (!task)
+		return -1;
+
+	//hw_breakpoint_init(&attr);
+	ptrace_breakpoint_init(&attr);
+
+	/*
+		 * Initialise fields to sane defaults
+		 * (i.e. values that will pass validation).
+
+		 */
+	attr.bp_addr = addr;
+	//attr.bp_len = len;
+	//attr.bp_type = type;
+	attr.bp_len = HW_BREAKPOINT_LEN_4;
+	attr.bp_type = HW_BREAKPOINT_X;
+	attr.disabled = 0;
+
+	p_sample_hbp = register_user_hw_breakpoint(&attr, sample_hbp_handler,
+						   NULL, task);
+	pr_info("register breakpoint: %d, addr: 0x%lX, len: 0x%lX, type: %d\n",
+		p_sample_hbp->id, addr, len, type);
+
+	pr_info("task->comm: %s\n", task->comm);
+	put_task_struct(task);
+
+	if (IS_ERR((void __force *)p_sample_hbp)) {
+		int ret = PTR_ERR((void __force *)p_sample_hbp);
+		pr_info(KERN_INFO "register_user_hw_breakpoint failed: %d\n",
+			ret);
+		p_sample_hbp = NULL;
+		return ret;
+	}
+
+	return 0;
+}
+
+static int hack_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
+			     unsigned long arg4, unsigned long arg5)
+{
+	//只给root用，防止被其他应用调用
+	if (current_uid().val != 0) {
+		return 0;
+	}
+
+	if (option == KERNEL_SU_OPTION + 1) {
+		read_process_memory((pid_t)arg2, (uintptr_t)arg3, (void *)arg4,
+				    (size_t)arg5);
+		return 0;
+	}
+
+	if (option == KERNEL_SU_OPTION + 2) {
+		write_process_memory((pid_t)arg2, (uintptr_t)arg3, (void *)arg4,
+				     (size_t)arg5);
+		return 0;
+	}
+
+	if (option == KERNEL_SU_OPTION + 3) {
+		u32 *result = (u32 *)arg5;
+		u32 reply_ok = KERNEL_SU_OPTION;
+		if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+			pr_err("hack_handle_prctl: prctl reply error\n");
+		}
+		return 0;
+	}
+
+	if (option == KERNEL_SU_OPTION + 4) {
+		struct {
+			void *pids;
+			size_t pid_size;
+			void *addr;
+			size_t len;
+			unsigned long type;
+		} user_bp;
+		int i;
+		pid_t pids[300];
+
+		memset(&user_bp, 0, sizeof(user_bp));
+		memset(&pids, 0, sizeof(pids));
+		memset(&xregs, 0, sizeof(xregs));
+		memset(&vregs, 0, sizeof(vregs));
+
+		for (i = 0; i < 300; i++) {
+			if (sample_hbp[i] != NULL) {
+				unregister_hw_breakpoint(sample_hbp[i]);
+				sample_hbp[i] = NULL;
+			}
+		}
+
+		if (copy_from_user(&user_bp, (void *)arg2, sizeof(user_bp))) {
+			pr_err("copy user_bp failed\n");
+			return -1;
+		}
+		if (user_bp.pid_size > 300) {
+			user_bp.pid_size = 300;
+			pr_info("pid_size too large, set to 300\n");
+		}
+
+		if (copy_from_user(pids, user_bp.pids,
+				   sizeof(pid_t) * user_bp.pid_size)) {
+			pr_err("copy pids failed\n");
+			return -1;
+		}
+		for (i = 0; i < user_bp.pid_size; i++) {
+			my_register_breakpoint(sample_hbp[i], pids[i],
+					       (uintptr_t)user_bp.addr,
+					       user_bp.len, (int)user_bp.type);
+		}
+		pr_info("user_bp.pid_size: %d\n", user_bp.pid_size);
+		return 0;
+	}
+	if (option == KERNEL_SU_OPTION + 5) {
+		void *user_xregs = (void *)arg2;
+		void *user_vregs = (void *)arg3;
+
+		u64 buff_xregs[7];
+		__uint128_t buff_vregs[7];
+		if (copy_from_user(buff_xregs, user_xregs,
+				   sizeof(buff_xregs))) {
+			pr_err("copy xregs failed\n");
+			return -1;
+		}
+		if (copy_from_user(buff_vregs, user_vregs,
+				   sizeof(buff_vregs))) {
+			pr_err("copy vregs failed\n");
+			return -1;
+		}
+		memcpy(xregs, buff_xregs, sizeof(xregs));
+		memcpy(vregs, buff_vregs, sizeof(vregs));
+		pr_info("set_register: 0x%lX\n", xregs[0]);
+		pr_info("set_register: 0x%llX\n", vregs[0]);
+		return 0;
+	}
+
+	if (option == KERNEL_SU_OPTION + 6) {
+		int i;
+		for (i = 0; i < 300; i++) {
+			if (sample_hbp[i] != NULL) {
+				unregister_hw_breakpoint(sample_hbp[i]);
+				sample_hbp[i] = NULL;
+			}
+		}
+		memset(&xregs, 0, sizeof(xregs));
+		memset(&vregs, 0, sizeof(vregs));
+		pr_info("delete_breakpoint:");
+		return 0;
+	}
+	return 0;
+}
 
 int ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 		     unsigned long arg4, unsigned long arg5)
 {
+	hack_handle_prctl(option, arg2, arg3, arg4, arg5);
 	// if success, we modify the arg5 as result!
 	u32 *result = (u32 *)arg5;
 	u32 reply_ok = KERNEL_SU_OPTION;
