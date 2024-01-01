@@ -65,10 +65,14 @@ jobs:
 
       - name: Display structure of downloaded files
         run: ls -R
-
+        
+      - name: set env
+        run: echo "NOW=$(date +'%Y.%m.%d')" >> $GITHUB_ENV
+    
       - name: release
         uses: softprops/action-gh-release@v1
         with:
+          tag: ${{ env.NOW }}
           files: |
             manager/*.apk
             AnyKernel3-*.zip
