@@ -365,7 +365,6 @@ static size_t write_process_memory(pid_t pid, uintptr_t addr, void *buffer,
 			break;
 	}
 
-out:
 	mmput(mm);
 put_task_struct:
 	put_task_struct(task);
