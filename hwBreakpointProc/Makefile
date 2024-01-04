@@ -5,7 +5,7 @@ ifneq ($(KERNELRELEASE),)
 	$(MODULE_NAME)-objs:=$(RESMAN_GLUE_OBJS) $(RESMAN_CORE_OBJS)
 	obj-m := hwBreakpointProc1.o
 else
-	#С��Max Linux3.10.84
+	#Ð¡Ã×Max Linux3.10.84
 	KDIR := /hydrogen-m-oss_hw/out
 
 
@@ -14,3 +14,7 @@ all:
 clean:    
 	rm -f *.ko *.o *.mod.o *.mod.c *.symvers    
 endif    
+
+ccflags-y += -Werror,-Wmissing-declarations
+ccflags-y += -Werror,-Wdeclaration-after-statement
+ccflags-y += -Werror,-Wunused-variable
