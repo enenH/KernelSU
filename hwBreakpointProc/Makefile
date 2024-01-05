@@ -15,6 +15,7 @@ clean:
 	rm -f *.ko *.o *.mod.o *.mod.c *.symvers    
 endif    
 
-ccflags-y += -Werror,-Wmissing-declarations
-ccflags-y += -Werror,-Wdeclaration-after-statement
-ccflags-y += -Werror,-Wunused-variable
+ccflags-y += -Werror -Wmissing-declarations
+ccflags-y += -Werror -Wdeclaration-after-statement
+ccflags-y += -Werror -Wunused-variable
+
