@@ -424,9 +424,7 @@ static int my_register_breakpoint(struct perf_event *p_sample_hbp, pid_t pid,
 
 	p_sample_hbp = register_user_hw_breakpoint(&attr, sample_hbp_handler,
 						   NULL, task);
-	pr_info("register breakpoint: %d, addr: 0x%lX, len: 0x%lX, type: %d\n",
-		p_sample_hbp->id, addr, len, type);
-
+	
 	pr_info("task->comm: %s\n", task->comm);
 	put_task_struct(task);
 
