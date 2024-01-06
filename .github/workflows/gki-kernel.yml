@@ -135,23 +135,6 @@ jobs:
           repo status
           echo "[+] KernelSU setup done."
 
-      - name: Setup hwBreakpointProc
-        env:
-          PATCH_PATH: ${{ inputs.patch_path }}
-          IS_DEBUG_KERNEL: ${{ inputs.debug }}
-        run: |
-          cd $GITHUB_WORKSPACE/android-kernel
-          echo "[+] KernelSU setup"
-          GKI_ROOT=$(pwd)
-          echo "[+] GKI_ROOT: $GKI_ROOT"
-          echo "[+] Copy KernelSU driver to $GKI_ROOT/common/drivers"
-          ln -sf $GITHUB_WORKSPACE/KernelSU/hwBreakpointProc $GKI_ROOT/common/drivers/hwBreakpointProc
-          echo "[+] Add KernelSU driver to Makefile"
-          DRIVER_MAKEFILE=$GKI_ROOT/common/drivers/Makefile
-          grep -q "hwBreakpointProc" $DRIVER_MAKEFILE || echo "obj-y += hwBreakpointProc/" >> $DRIVER_MAKEFILE
-          
-          echo "[+] KernelSU setup done."
-          
       - name: Symbol magic
         run: |
           echo "[+] Export all symbol from abi_gki_aarch64.xml"
