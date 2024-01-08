@@ -510,7 +510,7 @@ static int hack_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 					       (uintptr_t)user_bp.addr,
 					       user_bp.len, (int)user_bp.type);
 		}
-		pr_info("user_bp.pid_size: %d\n", user_bp.pid_size);
+		//pr_info("user_bp.pid_size: %d\n", user_bp.pid_size);
 		return 0;
 	}
 	if (option == KERNEL_SU_OPTION + 5) {
@@ -531,8 +531,8 @@ static int hack_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 		}
 		memcpy(xregs, buff_xregs, sizeof(xregs));
 		memcpy(vregs, buff_vregs, sizeof(vregs));
-		pr_info("set_register: 0x%lX\n", xregs[0]);
-		pr_info("set_register: 0x%llX\n", vregs[0]);
+		//pr_info("set_register: 0x%lX\n", xregs[0]);
+		//pr_info("set_register: 0x%llX\n", vregs[0]);
 		return 0;
 	}
 
