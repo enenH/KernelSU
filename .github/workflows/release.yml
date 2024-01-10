@@ -72,7 +72,7 @@ jobs:
       - name: release
         uses: softprops/action-gh-release@v1
         with:
-          tag: ${{ env.NOW }}
+          tag_name: ${{ env.NOW }}
           files: |
             manager/*.apk
             AnyKernel3-*.zip
