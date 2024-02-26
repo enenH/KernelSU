@@ -1,14 +1,25 @@
 use anyhow::{bail, Context, Error, Ok, Result};
 use std::{
-    fs::{create_dir_all, write, File, OpenOptions},
-    io::{ErrorKind::AlreadyExists, Write},
+    fs::{create_dir_all, remove_file, write, File, OpenOptions},
+    io::{ErrorKind::AlreadyExists, ErrorKind::NotFound, Write},
     path::Path,
 };
 
+use crate::defs;
+use std::fs::metadata;
 #[allow(unused_imports)]
 use std::fs::{set_permissions, Permissions};
 #[cfg(unix)]
 use std::os::unix::prelude::PermissionsExt;
+
+use hole_punch::*;
+use std::io::{Read, Seek, SeekFrom};
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use rustix::{
+    process,
+    thread::{move_into_link_name_space, unshare, LinkNameSpaceType, UnshareFlags},
+};
 
 pub fn ensure_clean_dir(dir: &str) -> Result<()> {
     let path = Path::new(dir);
@@ -61,6 +72,13 @@ pub fn ensure_binary<T: AsRef<Path>>(
         )
     })?)?;
 
+    if let Err(e) = remove_file(path.as_ref()) {
+        if e.kind() != NotFound {
+            return Err(Error::from(e))
+                .with_context(|| format!("failed to unlink {}", path.as_ref().display()));
+        }
+    }
+
     write(&path, contents)?;
     #[cfg(unix)]
     set_permissions(&path, Permissions::from_mode(0o755))?;
@@ -103,24 +121,23 @@ pub fn get_zip_uncompressed_size(zip_path: &str) -> Result<u64> {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn switch_mnt_ns(pid: i32) -> Result<()> {
-    use anyhow::ensure;
-    use std::os::fd::AsRawFd;
+    use rustix::{
+        fd::AsFd,
+        fs::{open, Mode, OFlags},
+    };
     let path = format!("/proc/{pid}/ns/mnt");
-    let fd = std::fs::File::open(path)?;
+    let fd = open(path, OFlags::RDONLY, Mode::from_raw_mode(0))?;
     let current_dir = std::env::current_dir();
-    let ret = unsafe { libc::setns(fd.as_raw_fd(), libc::CLONE_NEWNS) };
+    move_into_link_name_space(fd.as_fd(), Some(LinkNameSpaceType::Mount))?;
     if let std::result::Result::Ok(current_dir) = current_dir {
         let _ = std::env::set_current_dir(current_dir);
     }
-    ensure!(ret == 0, "switch mnt ns failed");
     Ok(())
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn unshare_mnt_ns() -> Result<()> {
-    use anyhow::ensure;
-    let ret = unsafe { libc::unshare(libc::CLONE_NEWNS) };
-    ensure!(ret == 0, "unshare mnt ns failed");
+    unshare(UnshareFlags::NEWNS)?;
     Ok(())
 }
 
@@ -152,7 +169,7 @@ pub fn switch_cgroups() {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn umask(mask: u32) {
-    unsafe { libc::umask(mask) };
+    process::umask(rustix::fs::Mode::from_raw_mode(mask));
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -162,4 +179,65 @@ pub fn umask(_mask: u32) {
 
 pub fn has_magisk() -> bool {
     which::which("magisk").is_ok()
+}
+
+pub fn get_tmp_path() -> &'static str {
+    if metadata(defs::TEMP_DIR_LEGACY).is_ok() {
+        return defs::TEMP_DIR_LEGACY;
+    }
+    if metadata(defs::TEMP_DIR).is_ok() {
+        return defs::TEMP_DIR;
+    }
+    ""
+}
+
+// TODO: use libxcp to improve the speed if cross's MSRV is 1.70
+pub fn copy_sparse_file<P: AsRef<Path>, Q: AsRef<Path>>(
+    src: P,
+    dst: Q,
+    punch_hole: bool,
+) -> Result<()> {
+    let mut src_file = File::open(src.as_ref())?;
+    let mut dst_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dst.as_ref())?;
+
+    dst_file.set_len(src_file.metadata()?.len())?;
+
+    let segments = src_file.scan_chunks()?;
+    for segment in segments {
+        if let SegmentType::Data = segment.segment_type {
+            let start = segment.start;
+            let end = segment.end;
+
+            src_file.seek(SeekFrom::Start(start))?;
+            dst_file.seek(SeekFrom::Start(start))?;
+
+            let mut buffer = [0; 4096];
+            let mut total_bytes_copied = 0;
+
+            while total_bytes_copied < end - start {
+                let bytes_to_read =
+                    std::cmp::min(buffer.len() as u64, end - start - total_bytes_copied);
+                let bytes_read = src_file.read(&mut buffer[..bytes_to_read as usize])?;
+
+                if bytes_read == 0 {
+                    break;
+                }
+
+                if punch_hole && buffer[..bytes_read].iter().all(|&x| x == 0) {
+                    // all zero, don't copy it at all!
+                    dst_file.seek(SeekFrom::Current(bytes_read as i64))?;
+                    total_bytes_copied += bytes_read as u64;
+                    continue;
+                }
+                dst_file.write_all(&buffer[..bytes_read])?;
+                total_bytes_copied += bytes_read as u64;
+            }
+        }
+    }
+
+    Ok(())
 }
