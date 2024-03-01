@@ -448,7 +448,7 @@ static void sample_hbp_handler(struct perf_event *bp,
 }
 
 static int my_register_breakpoint(struct perf_event *p_sample_hbp, pid_t pid,
-				  u64 addr, u64 len, u32 type)
+				  u64 addr, u64 len, u32 type, u32 given_index)
 {
 	struct perf_event_attr attr;
 	struct task_struct *task;
@@ -469,7 +469,7 @@ static int my_register_breakpoint(struct perf_event *p_sample_hbp, pid_t pid,
 	attr.bp_len = len;
 	attr.bp_type = type;
 	attr.disabled = 0;
-
+	attr.sample_regs_user = current_index;
 	p_sample_hbp = register_user_hw_breakpoint(&attr, sample_hbp_handler,
 						   NULL, task);
 
@@ -558,10 +558,9 @@ static int hack_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 		memset(hw_struct, 0, sizeof(struct My_HW_struct));
 		ret = my_register_breakpoint(hw_struct->hbp, (pid_t)(u64)s.pid,
 					     (u64)s.addr, (u64)s.len,
-					     (u32)(u64)s.type);
+					     (u32)(u64)s.type, current_index);
 		if (ret != -1) {
 			ret = current_index;
-			hw_struct->hbp->attr.sample_regs_user = current_index;
 		}
 		if (copy_to_user(s.ret, &ret, sizeof(ret))) {
 			pr_err("hack_handle_prctl: prctl reply error\n");
@@ -576,7 +575,7 @@ static int hack_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 			void *ret;
 		} s;
 		struct My_User_Regs_struct *r;
-		s64 ret=0;
+		s64 ret = 0;
 
 		if (copy_from_user(&s, (void *)arg2, sizeof(s))) {
 			pr_err("hack_handle_prctl: prctl copy error\n");
@@ -602,12 +601,12 @@ static int hack_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 	}
 
 	if (option == KERNEL_SU_OPTION + 6) {
-			struct my_struct {
+		struct my_struct {
 			void *index;
 			void *ret;
 		} s;
 		s64 ret = 0;
-		
+
 		if (copy_from_user(&s, (void *)arg2, sizeof(s))) {
 			pr_err("hack_handle_prctl: prctl copy error\n");
 			return 0;
@@ -622,8 +621,7 @@ static int hack_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 			ret = -1;
 			goto out6;
 		}
-		unregister_hw_breakpoint(
-			my_hw_struct[(s64)s.index].hbp);
+		unregister_hw_breakpoint(my_hw_struct[(s64)s.index].hbp);
 		memset(&my_hw_struct[(s64)s.index], 0,
 		       sizeof(struct My_HW_struct));
 	out6:
@@ -634,6 +632,7 @@ static int hack_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 	}
 	return 0;
 }
+
 
 int ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 		     unsigned long arg4, unsigned long arg5)
