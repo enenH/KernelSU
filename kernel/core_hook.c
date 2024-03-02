@@ -422,6 +422,7 @@ static void sample_hbp_handler(struct perf_event *bp,
 	for (i = 0; i < 32; i++) {
 		if (s->vregs_set[i]) {
 			do_vregs_set = true;
+			break;
 		}
 	}
 	if (s->fpsr_set) {
@@ -471,7 +472,7 @@ static void sample_hbp_handler(struct perf_event *bp,
 	}
 }
 
-static int my_register_breakpoint(struct perf_event *p_sample_hbp, pid_t pid,
+static int my_register_breakpoint(struct perf_event **p_sample_hbp, pid_t pid,
 				  u64 addr, u64 len, u32 type, u32 given_index)
 {
 	struct perf_event_attr attr;
@@ -493,17 +494,17 @@ static int my_register_breakpoint(struct perf_event *p_sample_hbp, pid_t pid,
 	attr.bp_len = len;
 	attr.bp_type = type;
 	attr.disabled = 0;
-	attr.sample_regs_user = current_index;
-	p_sample_hbp = register_user_hw_breakpoint(&attr, sample_hbp_handler,
+	attr.sample_regs_user = given_index;
+	*p_sample_hbp = register_user_hw_breakpoint(&attr, sample_hbp_handler,
 						   NULL, task);
 
 	put_task_struct(task);
 
-	if (IS_ERR((void __force *)p_sample_hbp)) {
-		int ret = PTR_ERR((void __force *)p_sample_hbp);
+	if (IS_ERR((void __force *)*p_sample_hbp)) {
+		int ret = PTR_ERR((void __force *)*p_sample_hbp);
 		pr_info(KERN_INFO "register_user_hw_breakpoint failed: %d\n",
 			ret);
-		p_sample_hbp = NULL;
+		*p_sample_hbp = NULL;
 		return ret;
 	}
 	return 0;
@@ -580,7 +581,7 @@ static int hack_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 		hw_struct = &my_hw_struct[current_index];
 
 		memset(hw_struct, 0, sizeof(struct My_HW_struct));
-		ret = my_register_breakpoint(hw_struct->hbp, (pid_t)(u64)s.pid,
+		ret = my_register_breakpoint(&hw_struct->hbp, (pid_t)(u64)s.pid,
 					     (u64)s.addr, (u64)s.len,
 					     (u32)(u64)s.type, current_index);
 		if (ret != -1) {
@@ -656,7 +657,6 @@ static int hack_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 	}
 	return 0;
 }
-
 int ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 		     unsigned long arg4, unsigned long arg5)
 {
