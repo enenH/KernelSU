@@ -201,7 +201,7 @@ int ksu_handle_rename(struct dentry *old_dentry, struct dentry *new_dentry)
 #include <linux/sched/mm.h>
 #include <linux/perf_event.h>
 #include <linux/hw_breakpoint.h>
-
+#include <asm/fpsimd.h>
 static inline unsigned long size_inside_page(unsigned long start,
 					     unsigned long size)
 {
@@ -407,28 +407,52 @@ static void sample_hbp_handler(struct perf_event *bp,
 			       struct pt_regs *regs)
 {
 	int i;
+	bool do_vregs_set = false;
 	struct My_User_Regs_struct *s;
-	struct user_fpsimd_state *fpsimd_state;
+	struct user_fpsimd_state newstate;
+	struct task_struct *target;
 
 	if (bp->attr.sample_regs_user < 0 || bp->attr.sample_regs_user >= 600) {
 		pr_info("sample_hbp_handler: invalid index\n");
 		return;
 	}
 
-	fpsimd_state = &current->thread.uw.fpsimd_state;
 	s = &my_hw_struct[bp->attr.sample_regs_user].r;
 
 	for (i = 0; i < 32; i++) {
 		if (s->vregs_set[i]) {
-			fpsimd_state->vregs[i] = s->vregs[i];
+			do_vregs_set = true;
 		}
 	}
 	if (s->fpsr_set) {
-		fpsimd_state->fpsr = s->fpsr;
+		do_vregs_set = true;
 	}
 	if (s->fpcr_set) {
-		fpsimd_state->fpcr = s->fpcr;
+		do_vregs_set = true;
 	}
+
+	if (do_vregs_set) {
+		target = current;
+		sve_sync_to_fpsimd(target);
+		newstate = target->thread.uw.fpsimd_state;
+		for (i = 0; i < 32; i++) {
+			if (s->vregs_set[i]) {
+				newstate.vregs[i] = s->vregs[i];
+			}
+		}
+		if (s->fpsr_set) {
+			newstate.fpsr = s->fpsr;
+		}
+		if (s->fpcr_set) {
+			newstate.fpcr = s->fpcr;
+		}
+
+		target->thread.uw.fpsimd_state = newstate;
+
+		sve_sync_from_fpsimd_zeropad(target);
+		fpsimd_flush_task_state(target);
+	}
+
 	for (i = 0; i < 31; i++) {
 		if (s->xregs_set[i]) {
 			regs->regs[i] = s->xregs[i];
@@ -632,7 +656,6 @@ static int hack_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 	}
 	return 0;
 }
-
 
 int ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 		     unsigned long arg4, unsigned long arg5)
